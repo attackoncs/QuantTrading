@@ -10,140 +10,67 @@ CASE：获取贵州茅台的财务指标
 同时用本地 data/600519_SH_daily.csv 最后一日作为基准日期；若需与 Tushare 收盘价一致，
 可直接采用 daily_basic 返回的 close。
 """
-import os
+# -*- coding: utf-8 -*-
+"""
+CASE：获取贵州茅台的财务指标（AkShare 版）
+pip install akshare
+
+接口：
+  ak.stock_individual_info_em(symbol)  → 总股本(股)、总市值(元)、行业、上市时间
+  ak.stock_zh_a_spot_em()             → 实时最新价、市盈率-动态、市净率
+"""
+import akshare as ak
 import pandas as pd
 
 STOCK_NAME = '贵州茅台'
-STOCK_CODE = '600519.SH'
-DATA_FILE = os.path.join(os.getcwd(), 'data', '600519_SH_daily.csv')
-
-
-def load_last_trade_date_from_csv(data_file):
-    """从本地 CSV 取最后交易日，用于与 Tushare 对齐日期"""
-    if not os.path.exists(data_file):
-        return None, None
-    df = pd.read_csv(data_file, encoding='utf-8-sig')
-    df['date'] = pd.to_datetime(df['date'])
-    if 'close' not in df.columns or len(df) == 0:
-        return None, None
-    df = df.sort_values('date').reset_index(drop=True)
-    last = df.iloc[-1]
-    date_str = pd.Timestamp(last['date']).strftime('%Y%m%d')
-    return date_str, float(last['close'])
-
-
-def fetch_daily_basic(ts_code, trade_date):
-    """调用 Tushare daily_basic 获取指定日期的每日指标（PE、PB、总股本、总市值等）"""
-    token = os.environ.get('TUSHARE_TOKEN')
-    if not token or not token.strip():
-        print("错误：未设置环境变量 TUSHARE_TOKEN")
-        return None
-    try:
-        import tushare as ts
-        ts.set_token(token.strip())
-        pro = ts.pro_api()
-        df = pro.daily_basic(
-            ts_code=ts_code,
-            trade_date=trade_date,
-            fields='ts_code,trade_date,close,pe,pb,total_share,total_mv,float_share,circ_mv'
-        )
-        if df is None or len(df) == 0:
-            return None
-        return df.iloc[0]
-    except Exception as e:
-        print(f"Tushare 请求失败：{e}")
-        return None
-
-
-def fetch_daily_basic_latest(ts_code, end_date, days_back=60):
-    """若指定日无数据，则取 end_date 之前最近一段日期的最后一条"""
-    token = os.environ.get('TUSHARE_TOKEN')
-    if not token or not token.strip():
-        return None
-    try:
-        import tushare as ts
-        ts.set_token(token.strip())
-        pro = ts.pro_api()
-        end_d = pd.Timestamp(end_date)
-        start_d = end_d - pd.Timedelta(days=days_back)
-        start_date = start_d.strftime('%Y%m%d')
-        df = pro.daily_basic(
-            ts_code=ts_code,
-            start_date=start_date,
-            end_date=end_date,
-            fields='ts_code,trade_date,close,pe,pb,total_share,total_mv,float_share,circ_mv'
-        )
-        if df is None or len(df) == 0:
-            return None
-        df = df.sort_values('trade_date').reset_index(drop=True)
-        return df.iloc[-1]
-    except Exception as e:
-        print(f"Tushare 请求失败：{e}")
-        return None
+SYMBOL     = '600519'   # 纯6位代码，AkShare 不加后缀
 
 
 def run_demo():
-    # 基准日期与本地收盘价（用于展示；若 Tushare 有 close 则优先用 Tushare）
-    trade_date_str, local_close = load_last_trade_date_from_csv(DATA_FILE)
-    if trade_date_str is None:
-        print("错误：无法从本地 CSV 获取最后交易日，请先运行 1-qmt_download_data.py 下载数据")
-        return
+    # ── 请求1：个股基本信息（总股本、总市值、行业） ──────
+    info = ak.stock_individual_info_em(symbol=SYMBOL)
+    # 返回 item/value 两列，转成字典方便取值
+    info_dict = dict(zip(info['item'], info['value']))
 
-    row = fetch_daily_basic(STOCK_CODE, trade_date_str)
-    if row is None:
-        row = fetch_daily_basic_latest(STOCK_CODE, trade_date_str)
-    if row is None:
-        print("错误：Tushare 未返回该日基本面数据（daily_basic 需一定积分权限），请检查 TUSHARE_TOKEN 与积分")
-        return
+    total_shares = float(info_dict.get('总股本', 0))       # 单位：股
+    total_mv_yuan = float(info_dict.get('总市值', 0))      # 单位：元
+    industry = info_dict.get('行业', '-')
+    list_date = str(info_dict.get('上市时间', '-'))
 
-    # daily_basic: total_share 万股, total_mv 万元, close 元, pe, pb
-    price = float(row.get('close', local_close))
-    if pd.isna(price) or price <= 0:
-        price = local_close
-    trade_date = str(row.get('trade_date', trade_date_str))
-    date_display = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
+    # ── 请求2：全市场实时行情，取茅台一行 ────────────────
+    spot = ak.stock_zh_a_spot_em()
+    row  = spot[spot['代码'] == SYMBOL].iloc[0]
 
-    total_share_wan = float(row.get('total_share', 0))
-    total_mv_wan = float(row.get('total_mv', 0))
-    pe_raw = row.get('pe')
-    pb_raw = row.get('pb')
+    price = float(row['最新价'])
+    pe    = float(row['市盈率-动态']) if pd.notna(row['市盈率-动态']) else None
+    pb    = float(row['市净率'])      if pd.notna(row['市净率'])      else None
+    today = pd.Timestamp.today().strftime('%Y-%m-%d')
 
-    # 总股本：万股 -> 股
-    total_shares = total_share_wan * 10000 if total_share_wan and total_share_wan > 0 else None
-    # 总市值：万元 -> 亿元（展示用）；也可 股价*总股本 验证
-    total_mv_yi = total_mv_wan / 10000 if total_mv_wan and total_mv_wan > 0 else None
-    market_cap = price * total_shares if total_shares else (total_mv_wan * 10000 if total_mv_wan else None)
+    # ── 派生指标 ──────────────────────────────────────────
+    market_cap_yi = total_mv_yuan / 1e8                    # 元→亿元
+    total_shares_yi = total_shares / 1e8                   # 股→亿股
+    eps = price / pe if pe and pe > 0 else None            # 每股收益（反推）
+    bps = price / pb if pb and pb > 0 else None            # 每股净资产（反推）
 
-    pe = float(pe_raw) if pe_raw is not None and not (isinstance(pe_raw, float) and pd.isna(pe_raw)) else None
-    pb = float(pb_raw) if pb_raw is not None and not (isinstance(pb_raw, float) and pd.isna(pb_raw)) else None
-
-    # EPS = 股价 / PE, BPS = 股价 / PB
-    eps = (price / pe) if pe and pe > 0 else None
-    bps = (price / pb) if pb and pb > 0 else None
-
-    print(f"数据来源：Tushare daily_basic（真实数据）")
-    print(f"基准日期：{date_display}")
-    print(f"收盘价：{price:.2f} 元")
-    if total_shares:
-        print(f"总股本：{total_shares / 1e8:.2f} 亿股")
-    if total_mv_yi is not None:
-        print(f"总市值（Tushare）：{total_mv_yi:.2f} 亿元")
-    if eps is not None:
-        print(f"每股收益(EPS)：{eps:.2f} 元（由 股价/PE 反推）")
-    if bps is not None:
-        print(f"每股净资产(BPS)：{bps:.2f} 元（由 股价/PB 反推）")
-    print("-" * 60)
-    if total_shares and market_cap is not None:
-        print(f"市值 = 股价 * 总股本 = {price:.2f} * {total_shares/1e8:.2f}亿 = {market_cap/1e8:.2f} 亿元")
-    elif total_mv_yi is not None:
-        print(f"总市值：{total_mv_yi:.2f} 亿元（Tushare）")
-    if pe is not None:
-        print(f"PE(市盈率) = {pe:.2f} （约{pe:.0f}年回本）")
-    if pb is not None:
-        print(f"PB(市净率) = {pb:.2f}")
-    print("-" * 60)
-    print("说明：PE 越低越便宜，但成长股可容忍高 PE；PB<1 为破净，常见于银行、钢铁。")
-    print("=" * 60)
+    # ── 输出 ──────────────────────────────────────────────
+    print(f"{'=' * 55}")
+    print(f"  {STOCK_NAME}({SYMBOL})  基本面指标  {today}")
+    print(f"{'=' * 55}")
+    print(f"  行业       ：{industry}（上市：{list_date}）")
+    print(f"  最新价     ：{price:.2f} 元")
+    print(f"  总股本     ：{total_shares_yi:.4f} 亿股")
+    print(f"  总市值     ：{market_cap_yi:,.2f} 亿元")
+    print(f"  验证市值   ：股价 × 总股本 = {price:.2f} × {total_shares_yi:.4f}亿 "
+          f"= {price * total_shares / 1e8:,.2f} 亿元")
+    print('-' * 55)
+    print(f"  PE（市盈率）：{pe:.2f}  → 按当前盈利约 {pe:.0f} 年回本" if pe else "  PE：无数据")
+    print(f"  PB（市净率）：{pb:.2f}  {'（低于1为破净）' if pb and pb < 1 else ''}" if pb else "  PB：无数据")
+    print(f"  EPS（反推） ：{eps:.2f} 元/股" if eps else "  EPS：无法计算")
+    print(f"  BPS（反推） ：{bps:.2f} 元/股" if bps else "  BPS：无法计算")
+    print('-' * 55)
+    print("  说明：PE 越低越便宜，成长股可容忍高 PE；PB<1 为破净，")
+    print("        常见于银行、钢铁；市值=股价×总股本，是收购整家公司的成本。")
+    print(f"{'=' * 55}")
 
 
 if __name__ == '__main__':
